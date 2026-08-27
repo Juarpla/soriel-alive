@@ -21,6 +21,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_TABLE: ${{ vars.SUPABASE_TABLE || '_keepalive' }}
         run: |
           set -euo pipefail
 
@@ -29,12 +30,13 @@ jobs:
             exit 1
           fi
 
-          ping_url="${SUPABASE_URL%/}/rest/v1/"
+          # /rest/v1/ (OpenAPI) now requires a secret key. A table query
+          # with the publishable key still reaches PostgREST and counts
+          # as project activity. A missing table returns 404 PGRST205,
+          # which is enough to keep the project awake.
+          ping_url="${SUPABASE_URL%/}/rest/v1/${SUPABASE_TABLE}?select=*&limit=1"
           echo "Pinging Supabase REST API"
 
-          # New sb_publishable_ keys are not JWTs. Send them only on
-          # apikey. Putting them in Authorization: Bearer makes Kong
-          # try to parse a JWT and the request fails with 401.
           attempts=6
           for i in $(seq 1 "$attempts"); do
             code=$(curl -sS -L -o /tmp/supabase-body.txt -w '%{http_code}' \
@@ -45,12 +47,12 @@ jobs:
             echo "Attempt $i/$attempts -> HTTP $code"
 
             case "$code" in
-              200|204|206)
+              200|204|206|404)
                 echo "Supabase is awake."
                 exit 0
                 ;;
               401|403)
-                echo "::error::Supabase rejected the anon key (HTTP $code). Check SUPABASE_ANON_KEY."
+                echo "::error::Supabase rejected the publishable key (HTTP $code). Check SUPABASE_ANON_KEY."
                 exit 1
                 ;;
             esac
@@ -58,5 +60,5 @@ jobs:
             sleep $((i * 15))
           done
 
-          echo "::warning::Supabase did not return HTTP 200 after $attempts attempts."
+          echo "::warning::Supabase did not respond successfully after $attempts attempts."
           exit 0
