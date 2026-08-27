@@ -1,0 +1,62 @@
+name: Keep Supabase alive
+
+on:
+  schedule:
+    # Daily at 06:00 UTC, offset from the Hugging Face ping.
+    # Free-tier projects pause after ~7 days of inactivity; GitHub
+    # cron can lag, so daily stays well inside that window.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keep-supabase-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ping Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::Missing secrets. Add SUPABASE_URL and SUPABASE_ANON_KEY in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          ping_url="${SUPABASE_URL%/}/rest/v1/"
+          echo "Pinging Supabase REST API"
+
+          # New sb_publishable_ keys are not JWTs. Send them only on
+          # apikey. Putting them in Authorization: Bearer makes Kong
+          # try to parse a JWT and the request fails with 401.
+          attempts=6
+          for i in $(seq 1 "$attempts"); do
+            code=$(curl -sS -L -o /tmp/supabase-body.txt -w '%{http_code}' \
+              --connect-timeout 20 --max-time 60 \
+              -H "apikey: ${SUPABASE_ANON_KEY}" \
+              -H "Accept: application/json" \
+              "$ping_url" || echo "000")
+            echo "Attempt $i/$attempts -> HTTP $code"
+
+            case "$code" in
+              200|204|206)
+                echo "Supabase is awake."
+                exit 0
+                ;;
+              401|403)
+                echo "::error::Supabase rejected the anon key (HTTP $code). Check SUPABASE_ANON_KEY."
+                exit 1
+                ;;
+            esac
+
+            sleep $((i * 15))
+          done
+
+          echo "::warning::Supabase did not return HTTP 200 after $attempts attempts."
+          exit 0
